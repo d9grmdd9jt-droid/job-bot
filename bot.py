@@ -1,33 +1,56 @@
 import json
+import os
 import re
+import time
+import urllib.error
 import urllib.request
 import urllib.parse
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 
 
 # ============================================================
-# НАСТРОЙКИ
+# CONFIG
 # ============================================================
 
-FEED_URL = "https://pam-stilling-feed.nav.no/api/v1/feed"
-TOKEN_URL = "https://pam-stilling-feed.nav.no/api/publicToken"
+NAV_FEED_URL = "https://pam-stilling-feed.nav.no/api/v1/feed"
+NAV_TOKEN_URL = "https://pam-stilling-feed.nav.no/api/publicToken"
 
-MAX_PAGES = 10
+STATE_FILE = "nav_state.json"
+JOBS_FILE = "jobs.json"
+
+# Первая синхронизация:
+# NAV указывает, что активная вакансия не живёт больше 6 месяцев.
+INITIAL_LOOKBACK_DAYS = 180
+
+# При каждом следующем запуске берём небольшой запас назад,
+# чтобы не потерять изменения между двумя запусками.
+OVERLAP_MINUTES = 10
+
+# Защита от бесконечного цикла.
+MAX_PAGES_PER_RUN = 500
+
+# HTTP retry.
+MAX_RETRIES = 5
+
+# Не делать слишком много запросов подряд.
+REQUEST_DELAY = 0.05
 
 
 # ============================================================
-# КЛЮЧЕВЫЕ СЛОВА
-# НОРВЕЖСКИЙ + АНГЛИЙСКИЙ
+# ПОИСКОВЫЕ СЛОВА
 # ============================================================
 
-KEYWORDS = [
+# Сильные признаки нужной нам работы.
+STRONG_KEYWORDS = [
 
-    # FARM / AGRICULTURE
+    # FARM
     "farm",
     "farmer",
-    "farm worker",
     "farmhand",
+    "farm worker",
+    "farm work",
     "agriculture",
     "agricultural",
     "agricultural worker",
@@ -37,33 +60,40 @@ KEYWORDS = [
     "gårdsarbeider",
     "gårdsarbeidere",
     "landbruk",
-    "landbruksarbeider",
     "landbruksarbeid",
+    "landbruksarbeider",
     "jordbruk",
-    "jordbruksarbeider",
     "jordbruksarbeid",
+    "jordbruksarbeider",
 
     # ANIMALS
     "livestock",
-    "animal",
-    "animals",
     "animal care",
+    "animal worker",
+    "animal husbandry",
+
     "dyrehold",
     "dyrestell",
     "dyrepasser",
     "dyrepleier",
     "fjøs",
+    "fjos",
     "avløser",
+    "avloser",
     "røkter",
+    "rokter",
     "husdyr",
 
     # GREENHOUSE / GARDEN
     "greenhouse",
     "gardener",
     "gardening",
+    "horticulture",
+
     "gartner",
     "gartnerarbeid",
     "veksthus",
+    "planteproduksjon",
     "plante",
     "planter",
     "hagearbeid",
@@ -73,70 +103,74 @@ KEYWORDS = [
     "berry",
     "berries",
     "harvest",
-    "seasonal",
+    "harvesting",
     "seasonal worker",
+    "seasonal work",
+
     "frukt",
     "bær",
     "innhøsting",
-    "sesong",
     "sesongarbeid",
     "sesongarbeider",
     "sesongarbeidere",
 
     # FORESTRY
     "forestry",
-    "forest",
     "forest worker",
     "forestry worker",
-    "logger",
     "logging",
+    "logger",
     "chainsaw",
-    "wood",
+    "wood worker",
+    "woodwork",
     "sawmill",
     "timber",
 
-    "skog",
     "skogbruk",
     "skogarbeid",
     "skogarbeider",
     "skogsarbeider",
     "skogbruksarbeider",
+    "skogbruker",
     "hogst",
     "tømmer",
+    "tommer",
     "tømmerhogst",
-    "ved",
-    "vedproduksjon",
+    "tommerhogst",
     "sagbruk",
     "trevirke",
+    "vedproduksjon",
 
-    # WAREHOUSE
+    # WAREHOUSE / LOGISTICS
     "warehouse",
     "warehouse worker",
     "warehouse operative",
     "warehouse assistant",
+    "order picker",
+    "picker",
+    "packer",
+    "packing",
+
     "lager",
+    "lagerarbeid",
     "lagerarbeider",
     "lagermedarbeider",
-    "lagerarbeid",
     "lagerjobb",
     "varelager",
-    "logistikk",
-    "plukker",
+    "vareplukk",
+    "ordreplukk",
     "ordreplukker",
+    "plukker",
     "pakker",
     "pakking",
-    "vareplukk",
 
-    # PRODUCTION / FACTORY
+    # PRODUCTION
     "production worker",
     "production operative",
     "factory worker",
-    "production",
     "factory",
-    "packing",
-    "packer",
-    "picker",
     "manufacturing",
+    "production",
 
     "produksjon",
     "produksjonsarbeid",
@@ -145,57 +179,68 @@ KEYWORDS = [
     "fabrikk",
     "fabrikkarbeider",
     "industriproduksjon",
-    "pakking",
-    "pakker",
-    "pakking",
     "sortering",
     "sorteringsarbeid",
 
-    # GENERAL PHYSICAL WORK
+    # PHYSICAL / OUTDOOR
     "labourer",
     "laborer",
-    "general worker",
     "manual worker",
+    "manual labour",
+    "manual labor",
     "physical work",
+    "general worker",
 
-    "arbeider",
-    "arbeidsmann",
     "hjelpearbeider",
-    "håndverker",
+    "hjelpearbeid",
     "manuelt arbeid",
     "fysisk arbeid",
     "praktisk arbeid",
-
-    # CONSTRUCTION / OUTDOOR
-    "construction worker",
-    "construction",
-    "anleggsarbeider",
-    "anleggsarbeid",
-    "byggarbeider",
-    "byggearbeid",
+    "ute arbeid",
     "utearbeid",
     "utendørsarbeid",
 
-    # MACHINE / TRACTOR
-    "tractor",
+    # CONSTRUCTION / OUTDOOR
+    "construction worker",
+    "construction labourer",
+    "construction laborer",
+    "anlegg",
+    "anleggsarbeid",
+    "anleggsarbeider",
+    "byggarbeid",
+    "byggarbeider",
+
+    # MACHINES / TRACTOR
     "tractor driver",
+    "tractor operator",
     "machine operator",
-    "maskinfører",
-    "maskinoperatør",
+    "machine operator",
     "traktorfører",
-    "traktor",
+    "traktorforer",
+    "maskinfører",
+    "maskinforer",
+    "maskinoperatør",
+    "maskinoperator",
 ]
 
 
-# ============================================================
-# СЛОВА, КОТОРЫЕ ЧАСТО ОЗНАЧАЮТ НЕПОДХОДЯЩУЮ ПРОФЕССИЮ
-# ============================================================
+# Слова, которые сами по себе не должны считаться совпадением,
+# но могут усилить результат вместе с контекстом.
+GENERIC_KEYWORDS = [
+    "worker",
+    "arbeider",
+    "arbeid",
+    "operator",
+    "operatør",
+    "medarbeider",
+    "hjelper",
+]
 
-EXCLUDE = [
 
-    # IT
-    "software engineer",
-    "software developer",
+# Если эти слова находятся именно в TITLE/JOB TITLE,
+# вакансия обычно не подходит под нашу задачу.
+TITLE_EXCLUDE = [
+    "software",
     "developer",
     "programmer",
     "programmering",
@@ -206,167 +251,521 @@ EXCLUDE = [
     "data scientist",
     "data engineer",
     "systemutvikler",
-    "systemutvikling",
     "it-konsulent",
-    "it konsulent",
 
-    # MEDICAL
     "doctor",
     "dentist",
-    "doctorate",
     "lege",
     "tannlege",
     "sykepleier",
-    "sykepleie",
     "kirurg",
 
-    # LAW
     "lawyer",
     "jurist",
     "advokat",
 
-    # FINANCE
     "accountant",
-    "accounting",
     "regnskapsfører",
-    "regnskap",
+    "regnskapsforer",
 
-    # HIGH-SKILL OFFICE
     "architect",
     "arkitekt",
-    "financial analyst",
-    "analytiker",
-    "controller",
 ]
+
+
+# Контекст для слишком общих слов.
+GENERIC_CONTEXTS = [
+
+    "farm",
+    "gård",
+    "landbruk",
+    "jordbruk",
+    "skog",
+    "forest",
+    "lager",
+    "warehouse",
+    "produksjon",
+    "production",
+    "fabrikk",
+    "factory",
+    "anlegg",
+    "construction",
+    "dyr",
+    "animal",
+    "fjøs",
+    "fjos",
+    "frukt",
+    "bær",
+    "berry",
+    "harvest",
+    "sesong",
+    "seasonal",
+    "ved",
+    "wood",
+    "tømmer",
+    "tommer",
+    "traktor",
+    "tractor",
+    "maskin",
+    "machine",
+]
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def normalize(value):
+    """
+    Приводим текст к стабильному виду.
+    """
+
+    if value is None:
+        return ""
+
+    value = str(value)
+
+    value = unicodedata.normalize(
+        "NFKC",
+        value
+    )
+
+    value = value.lower()
+
+    # HTML -> пробелы
+    value = re.sub(
+        r"<[^>]*>",
+        " ",
+        value
+    )
+
+    # NBSP и прочее
+    value = value.replace(
+        "\xa0",
+        " "
+    )
+
+    # Несколько пробелов
+    value = re.sub(
+        r"\s+",
+        " ",
+        value
+    )
+
+    return value.strip()
+
+
+def contains_keyword(text, keyword):
+    """
+    Ищем фразу/слово с более безопасными границами.
+    """
+
+    keyword = normalize(keyword)
+
+    if not keyword:
+        return False
+
+    if " " in keyword:
+        return keyword in text
+
+    return re.search(
+        r"(?<![\wåæø])"
+        + re.escape(keyword)
+        + r"(?![\wåæø])",
+        text,
+        re.IGNORECASE
+    ) is not None
+
+
+def utc_now():
+    return datetime.now(
+        timezone.utc
+    )
+
+
+def parse_datetime(value):
+    """
+    Пытаемся разобрать ISO дату NAV.
+    """
+
+    if not value:
+        return None
+
+    value = str(value).strip()
+
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+
+        dt = datetime.fromisoformat(
+            value
+        )
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return dt.astimezone(
+            timezone.utc
+        )
+
+    except Exception:
+        return None
+
+
+def rfc1123(dt):
+    """
+    Формат If-Modified-Since.
+    """
+
+    return format_datetime(
+        dt.astimezone(timezone.utc),
+        usegmt=True
+    )
 
 
 # ============================================================
 # HTTP
 # ============================================================
 
-def http_get(url, headers=None):
+def http_request(
+    url,
+    headers=None,
+    retries=MAX_RETRIES
+):
+    """
+    Надёжный GET с retry для временных ошибок.
+    """
 
-    request = urllib.request.Request(
-        url,
-        headers=headers or {
-            "User-Agent": "job-bot/1.0"
-        }
-    )
+    last_error = None
 
-    with urllib.request.urlopen(
-        request,
-        timeout=30
-    ) as response:
+    for attempt in range(
+        1,
+        retries + 1
+    ):
 
-        return (
-            response.status,
-            dict(response.headers),
-            response.read()
+        request = urllib.request.Request(
+            url,
+            headers=headers or {},
+            method="GET"
         )
 
+        try:
 
-# ============================================================
-# НОРМАЛИЗАЦИЯ ТЕКСТА
-# ============================================================
+            with urllib.request.urlopen(
+                request,
+                timeout=45
+            ) as response:
 
-def normalize(text):
+                body = response.read()
 
-    if not text:
-        return ""
+                return (
+                    response.status,
+                    dict(response.headers),
+                    body
+                )
 
-    text = str(text).lower()
+        except urllib.error.HTTPError as error:
 
-    # Убираем HTML
-    text = re.sub(
-        r"<[^>]+>",
-        " ",
-        text
+            last_error = error
+
+            status = error.code
+
+            # 304 = ничего нового
+            if status == 304:
+
+                return (
+                    304,
+                    dict(error.headers),
+                    b""
+                )
+
+            # 429 / 5xx — повторяем
+            if status == 429 or status >= 500:
+
+                retry_after = (
+                    error.headers.get(
+                        "Retry-After"
+                    )
+                )
+
+                try:
+                    wait = float(
+                        retry_after
+                    )
+                except Exception:
+                    wait = min(
+                        2 ** attempt,
+                        30
+                    )
+
+                print(
+                    f"HTTP {status}. "
+                    f"Retry {attempt}/{retries} "
+                    f"in {wait:.1f}s..."
+                )
+
+                time.sleep(wait)
+
+                continue
+
+            # Остальные HTTP ошибки сразу показываем.
+            try:
+                error_body = error.read().decode(
+                    "utf-8",
+                    errors="replace"
+                )
+            except Exception:
+                error_body = ""
+
+            raise RuntimeError(
+                f"HTTP {status} for {url}\n"
+                f"{error_body[:500]}"
+            )
+
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError
+        ) as error:
+
+            last_error = error
+
+            wait = min(
+                2 ** attempt,
+                30
+            )
+
+            print(
+                f"Network error: {error}. "
+                f"Retry {attempt}/{retries} "
+                f"in {wait}s..."
+            )
+
+            time.sleep(wait)
+
+    raise RuntimeError(
+        f"Request failed after "
+        f"{retries} attempts: {url}\n"
+        f"{last_error}"
     )
 
-    # Нормализация Unicode
-    text = unicodedata.normalize(
-        "NFKC",
-        text
-    )
-
-    # Пробелы
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
-    return text.strip()
-
 
 # ============================================================
-# TOKEN
+# NAV TOKEN
 # ============================================================
 
-def get_token():
+def get_nav_token():
 
-    print("Getting NAV public token...")
+    print(
+        "Getting NAV public token..."
+    )
 
-    status, headers, body = http_get(
-        TOKEN_URL,
+    status, headers, body = http_request(
+        NAV_TOKEN_URL,
         {
-            "User-Agent": "job-bot/1.0",
+            "User-Agent": "job-bot/2.0",
             "Accept": "*/*"
         }
     )
+
+    if status != 200:
+        raise RuntimeError(
+            f"NAV token endpoint returned HTTP {status}"
+        )
 
     text = body.decode(
         "utf-8",
         errors="replace"
     ).strip()
 
-    if status != 200:
+    if not text:
         raise RuntimeError(
-            f"NAV token error: HTTP {status}"
+            "NAV returned empty token response"
         )
 
-    # NAV отдаёт текст перед JWT.
-    # Ищем только настоящий JWT.
-    match = re.search(
-        r"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)",
+    # NAV может вернуть:
+    #
+    # *** public token for Nav Job Vacancy Feed:
+    # eyJ....eyJ....xxx
+    #
+    # Нам нужен только JWT.
+
+    matches = re.findall(
+        r"(eyJ[A-Za-z0-9_-]+\."
+        r"[A-Za-z0-9_-]+\."
+        r"[A-Za-z0-9_-]+)",
         text
     )
 
-    if not match:
+    if not matches:
         raise RuntimeError(
-            "Could not find JWT token in NAV response"
+            "Could not find JWT in NAV token response"
         )
 
-    token = match.group(1)
+    token = matches[0].strip()
 
-    print("NAV token obtained successfully.")
+    print(
+        "NAV token obtained successfully."
+    )
 
     return token
+
+
+# ============================================================
+# STATE
+# ============================================================
+
+def load_json_file(path, default):
+
+    if not os.path.exists(path):
+        return default
+
+    try:
+
+        with open(
+            path,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            return json.load(file)
+
+    except Exception as error:
+
+        print(
+            f"WARNING: could not read {path}: {error}"
+        )
+
+        return default
+
+
+def save_json_file(path, data):
+
+    temporary = path + ".tmp"
+
+    with open(
+        temporary,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            data,
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    os.replace(
+        temporary,
+        path
+    )
+
+
+def get_start_time():
+
+    state = load_json_file(
+        STATE_FILE,
+        {}
+    )
+
+    last_success = state.get(
+        "last_successful_sync"
+    )
+
+    parsed = parse_datetime(
+        last_success
+    )
+
+    if parsed:
+
+        start = (
+            parsed
+            - timedelta(
+                minutes=OVERLAP_MINUTES
+            )
+        )
+
+        print(
+            "Incremental sync."
+        )
+
+        print(
+            "Checking changes since:",
+            rfc1123(start)
+        )
+
+        return start
+
+    # Первый запуск.
+    start = (
+        utc_now()
+        - timedelta(
+            days=INITIAL_LOOKBACK_DAYS
+        )
+    )
+
+    print(
+        "FIRST RUN."
+    )
+
+    print(
+        "Checking last",
+        INITIAL_LOOKBACK_DAYS,
+        "days."
+    )
+
+    print(
+        "Since:",
+        rfc1123(start)
+    )
+
+    return start
 
 
 # ============================================================
 # FEED
 # ============================================================
 
-def get_feed(url, token):
+def get_feed_page(
+    url,
+    token,
+    modified_since
+):
 
-    status, headers, body = http_get(
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "job-bot/2.0",
+        "If-Modified-Since": rfc1123(
+            modified_since
+        )
+    }
+
+    status, response_headers, body = http_request(
         url,
-        {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-            "User-Agent": "job-bot/1.0"
-        }
+        headers
     )
+
+    if status == 304:
+        return (
+            None,
+            response_headers
+        )
 
     if status != 200:
         raise RuntimeError(
-            f"NAV feed error: HTTP {status}"
+            f"NAV feed returned HTTP {status}"
         )
 
     try:
-        return json.loads(
-            body.decode("utf-8")
+
+        data = json.loads(
+            body.decode(
+                "utf-8"
+            )
         )
 
     except json.JSONDecodeError as error:
@@ -379,132 +778,170 @@ def get_feed(url, token):
             f"Invalid NAV JSON: {error}"
         )
 
-
-# ============================================================
-# URL
-# ============================================================
-
-def absolute_url(url):
-
-    if not url:
-        return None
-
-    if url.startswith("http://"):
-        return url
-
-    if url.startswith("https://"):
-        return url
-
-    return urllib.parse.urljoin(
-        "https://pam-stilling-feed.nav.no/",
-        url
+    return (
+        data,
+        response_headers
     )
 
 
 # ============================================================
-# СОБИРАЕМ ТЕКСТ ВАКАНСИИ
+# BASIC MATCH
 # ============================================================
 
-def get_search_text(job):
+def get_basic_text(job):
 
     feed = job.get(
         "_feed_entry",
         {}
     )
 
-    text = " ".join([
-        str(job.get("title", "")),
-        str(job.get("content_text", "")),
-        str(feed.get("title", "")),
-        str(feed.get("businessName", "")),
-        str(feed.get("municipal", "")),
-    ])
+    return normalize(
+        " ".join([
+            str(job.get("title", "")),
+            str(job.get("content_text", "")),
+            str(feed.get("title", "")),
+            str(feed.get("businessName", "")),
+            str(feed.get("municipal", "")),
+        ])
+    )
 
-    return normalize(text)
+
+def get_title_text(job):
+
+    feed = job.get(
+        "_feed_entry",
+        {}
+    )
+
+    return normalize(
+        " ".join([
+            str(job.get("title", "")),
+            str(feed.get("title", "")),
+        ])
+    )
 
 
-# ============================================================
-# ПОИСК ПОДХОДЯЩЕЙ ВАКАНСИИ
-# ============================================================
+def basic_candidate(job):
 
-def matches(job):
+    title = get_title_text(
+        job
+    )
 
-    text = get_search_text(job)
+    text = get_basic_text(
+        job
+    )
 
-    # Сначала исключения
-    for word in EXCLUDE:
+    # Не отбрасываем по словам из описания.
+    # Только TITLE.
+    for bad in TITLE_EXCLUDE:
 
-        if normalize(word) in text:
+        if contains_keyword(
+            title,
+            bad
+        ):
             return False
 
-    # Потом подходящие слова
-    for word in KEYWORDS:
+    # Сильное совпадение.
+    for keyword in STRONG_KEYWORDS:
 
-        if normalize(word) in text:
+        if contains_keyword(
+            text,
+            keyword
+        ):
+            return True
+
+    # Generic слово разрешаем только
+    # при наличии тематического контекста.
+    has_generic = any(
+        contains_keyword(
+            text,
+            word
+        )
+        for word in GENERIC_KEYWORDS
+    )
+
+    if has_generic:
+
+        has_context = any(
+            contains_keyword(
+                text,
+                context
+            )
+            for context in GENERIC_CONTEXTS
+        )
+
+        if has_context:
             return True
 
     return False
 
 
 # ============================================================
-# ПОЛНАЯ ИНФОРМАЦИЯ О ВАКАНСИИ
+# FULL JOB
 # ============================================================
 
-def get_details(job, token):
+def get_full_job(
+    job,
+    token
+):
 
-    url = absolute_url(
-        job.get("url")
+    url = job.get(
+        "url"
     )
 
     if not url:
-        return {}
+        return None
+
+    url = urllib.parse.urljoin(
+        NAV_FEED_URL,
+        url
+    )
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "job-bot/2.0"
+    }
+
+    status, response_headers, body = http_request(
+        url,
+        headers
+    )
+
+    if status != 200:
+        return None
 
     try:
 
-        status, headers, body = http_get(
-            url,
-            {
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-                "User-Agent": "job-bot/1.0"
-            }
+        data = json.loads(
+            body.decode(
+                "utf-8"
+            )
         )
 
-        if status != 200:
-            return {}
+    except Exception:
+        return None
 
-        return json.loads(
-            body.decode("utf-8")
+    # NAV обычно возвращает:
+    # {
+    #   uuid,
+    #   ad_content,
+    #   status
+    # }
+
+    status_value = str(
+        data.get(
+            "status",
+            ""
         )
+    ).upper()
 
-    except Exception as error:
+    if status_value == "INACTIVE":
+        return None
 
-        print(
-            f"Details error: {error}"
-        )
-
-        return {}
-
-
-# ============================================================
-# ИЗВЛЕЧЕНИЕ ДАННЫХ
-# ============================================================
-
-def build_job(job, token):
-
-    feed = job.get(
-        "_feed_entry",
-        {}
-    )
-
-    details = get_details(
-        job,
-        token
-    )
-
-    content = details.get(
+    content = data.get(
         "ad_content",
-        details
+        {}
     )
 
     if not isinstance(
@@ -512,6 +949,217 @@ def build_job(job, token):
         dict
     ):
         content = {}
+
+    return content
+
+
+# ============================================================
+# FULL TEXT / CATEGORY
+# ============================================================
+
+def category_text(content):
+
+    parts = []
+
+    occupation_categories = content.get(
+        "occupationCategories",
+        []
+    )
+
+    if isinstance(
+        occupation_categories,
+        list
+    ):
+
+        for item in occupation_categories:
+
+            if isinstance(
+                item,
+                dict
+            ):
+
+                parts.extend([
+                    item.get(
+                        "level1",
+                        ""
+                    ),
+                    item.get(
+                        "level2",
+                        ""
+                    )
+                ])
+
+    category_list = content.get(
+        "categoryList",
+        []
+    )
+
+    if isinstance(
+        category_list,
+        list
+    ):
+
+        for item in category_list:
+
+            if isinstance(
+                item,
+                dict
+            ):
+
+                parts.extend([
+                    item.get(
+                        "categoryType",
+                        ""
+                    ),
+                    item.get(
+                        "name",
+                        ""
+                    ),
+                    item.get(
+                        "description",
+                        ""
+                    )
+                ])
+
+    return normalize(
+        " ".join(
+            str(x)
+            for x in parts
+            if x
+        )
+    )
+
+
+def full_job_matches(
+    content
+):
+
+    title = normalize(
+        content.get(
+            "title",
+            ""
+        )
+    )
+
+    jobtitle = normalize(
+        content.get(
+            "jobtitle",
+            ""
+        )
+    )
+
+    description = normalize(
+        content.get(
+            "description",
+            ""
+        )
+    )
+
+    categories = category_text(
+        content
+    )
+
+    combined = " ".join([
+        title,
+        jobtitle,
+        description,
+        categories
+    ])
+
+    # Отбрасываем только по должности.
+    title_for_exclusion = " ".join([
+        title,
+        jobtitle
+    ])
+
+    for bad in TITLE_EXCLUDE:
+
+        if contains_keyword(
+            title_for_exclusion,
+            bad
+        ):
+            return False, 0, []
+
+    matched = []
+
+    for keyword in STRONG_KEYWORDS:
+
+        if contains_keyword(
+            combined,
+            keyword
+        ):
+            matched.append(
+                keyword
+            )
+
+    # Generic только с контекстом.
+    if not matched:
+
+        generic_found = any(
+            contains_keyword(
+                combined,
+                word
+            )
+            for word in GENERIC_KEYWORDS
+        )
+
+        context_found = any(
+            contains_keyword(
+                combined,
+                context
+            )
+            for context in GENERIC_CONTEXTS
+        )
+
+        if generic_found and context_found:
+
+            matched.append(
+                "generic+context"
+            )
+
+    if not matched:
+        return False, 0, []
+
+    # Вес:
+    # title > jobtitle > categories > description
+    score = 0
+
+    for keyword in matched:
+
+        if contains_keyword(
+            title,
+            keyword
+        ):
+            score += 10
+
+        elif contains_keyword(
+            jobtitle,
+            keyword
+        ):
+            score += 9
+
+        elif contains_keyword(
+            categories,
+            keyword
+        ):
+            score += 7
+
+        else:
+            score += 3
+
+    return True, score, matched
+
+
+# ============================================================
+# FORMAT RESULT
+# ============================================================
+
+def build_result(
+    feed_job,
+    content,
+    score,
+    matched
+):
 
     employer = content.get(
         "employer",
@@ -546,10 +1194,21 @@ def build_job(job, token):
             continue
 
         clean_contacts.append({
-            "name": contact.get("name"),
-            "email": contact.get("email"),
-            "phone": contact.get("phone"),
-            "role": contact.get("role"),
+            "name": contact.get(
+                "name"
+            ),
+            "email": contact.get(
+                "email"
+            ),
+            "phone": contact.get(
+                "phone"
+            ),
+            "role": contact.get(
+                "role"
+            ),
+            "title": contact.get(
+                "title"
+            )
         })
 
     locations = content.get(
@@ -563,83 +1222,164 @@ def build_job(job, token):
     ):
         locations = []
 
-    location = None
+    clean_locations = []
 
-    if locations:
+    for location in locations:
 
-        first = locations[0]
-
-        if isinstance(
-            first,
+        if not isinstance(
+            location,
             dict
         ):
-            location = {
-                "country": first.get("country"),
-                "city": first.get("city"),
-                "municipal": first.get("municipal"),
-                "address": first.get("address"),
-            }
+            continue
 
-    application_url = (
-        content.get("applicationUrl")
-        or content.get("applicationUrl")
-    )
+        clean_locations.append({
+            "country": location.get(
+                "country"
+            ),
+            "county": location.get(
+                "county"
+            ),
+            "municipal": location.get(
+                "municipal"
+            ),
+            "city": location.get(
+                "city"
+            ),
+            "address": location.get(
+                "address"
+            ),
+            "postalCode": location.get(
+                "postalCode"
+            )
+        })
 
     return {
 
-        "id": job.get("id"),
+        "id": feed_job.get(
+            "id"
+        ),
 
         "title": (
-            content.get("title")
-            or job.get("title")
+            content.get(
+                "title"
+            )
+            or feed_job.get(
+                "title"
+            )
+        ),
+
+        "jobtitle": content.get(
+            "jobtitle"
         ),
 
         "company": (
-            employer.get("name")
-            or feed.get("businessName")
+            employer.get(
+                "name"
+            )
+            or feed_job.get(
+                "_feed_entry",
+                {}
+            ).get(
+                "businessName"
+            )
         ),
 
-        "location": location,
+        "organization_number":
+            employer.get(
+                "orgnr"
+            ),
 
-        "job_url": absolute_url(
-            job.get("url")
-        ),
+        "locations":
+            clean_locations,
 
-        "application_url": application_url,
+        "description":
+            content.get(
+                "description"
+            ),
 
-        "source_url": content.get(
-            "sourceurl"
-        ),
+        "application_url":
+            content.get(
+                "applicationUrl"
+            ),
 
-        "description": content.get(
-            "description"
-        ),
+        "source_url":
+            content.get(
+                "sourceurl"
+            ),
 
-        "employment_type": content.get(
-            "engagementtype"
-        ),
+        "link":
+            content.get(
+                "link"
+            ),
 
-        "extent": content.get(
-            "extent"
-        ),
+        "job_url":
+            feed_job.get(
+                "url"
+            ),
 
-        "start_time": content.get(
-            "starttime"
-        ),
+        "application_deadline":
+            content.get(
+                "applicationDue"
+            ),
 
-        "deadline": content.get(
-            "applicationDue"
-        ),
+        "start_time":
+            content.get(
+                "starttime"
+            ),
 
-        "homepage": employer.get(
-            "homepage"
-        ),
+        "employment_type":
+            content.get(
+                "engagementtype"
+            ),
 
-        "contacts": clean_contacts,
+        "extent":
+            content.get(
+                "extent"
+            ),
 
-        "date_modified": job.get(
-            "date_modified"
-        ),
+        "position_count":
+            content.get(
+                "positioncount"
+            ),
+
+        "work_language":
+            content.get(
+                "workLanguage"
+            ),
+
+        "employer_homepage":
+            employer.get(
+                "homepage"
+            ),
+
+        "contacts":
+            clean_contacts,
+
+        "matched_keywords":
+            matched,
+
+        "score":
+            score,
+
+        "date_modified":
+            feed_job.get(
+                "date_modified"
+            ),
+
+        "updated":
+            content.get(
+                "updated"
+            ),
+
+        "published":
+            content.get(
+                "published"
+            ),
+
+        "expires":
+            content.get(
+                "expires"
+            ),
     }
 
 
@@ -649,40 +1389,92 @@ def build_job(job, token):
 
 def main():
 
-    print("=" * 60)
-    print("JOB BOT STARTED")
-    print("=" * 60)
+    print("")
+    print("=" * 70)
+    print("NORWAY JOB BOT")
+    print("=" * 70)
 
-    token = get_token()
+    run_started = utc_now()
 
-    print("Getting NAV job feed...")
+    # --------------------------------------------------------
+    # TOKEN
+    # --------------------------------------------------------
 
-    next_url = FEED_URL
+    token = get_nav_token()
 
-    found = []
+    # --------------------------------------------------------
+    # STATE
+    # --------------------------------------------------------
 
-    seen = set()
+    state = load_json_file(
+        STATE_FILE,
+        {}
+    )
 
-    total_active = 0
+    jobs_db = load_json_file(
+        JOBS_FILE,
+        {}
+    )
 
-    total_checked = 0
-
-    for page in range(
-        1,
-        MAX_PAGES + 1
+    if not isinstance(
+        jobs_db,
+        dict
     ):
+        jobs_db = {}
 
-        if not next_url:
-            break
+    start_time = get_start_time()
+
+    # --------------------------------------------------------
+    # STATS
+    # --------------------------------------------------------
+
+    pages = 0
+    feed_items = 0
+    active_items = 0
+    inactive_items = 0
+    candidates = 0
+    details_checked = 0
+    matches = 0
+
+    next_url = NAV_FEED_URL
+
+    seen_feed_ids = set()
+
+    # --------------------------------------------------------
+    # FEED PAGINATION
+    # --------------------------------------------------------
+
+    while next_url:
+
+        pages += 1
+
+        if pages > MAX_PAGES_PER_RUN:
+
+            raise RuntimeError(
+                "Safety limit reached: "
+                f"{MAX_PAGES_PER_RUN} feed pages. "
+                "Increase MAX_PAGES_PER_RUN only "
+                "if absolutely necessary."
+            )
 
         print(
-            f"Checking feed page {page}..."
+            f"Checking feed page {pages}..."
         )
 
-        data = get_feed(
+        data, response_headers = get_feed_page(
             next_url,
-            token
+            token,
+            start_time
         )
+
+        # 304 = изменений нет.
+        if data is None:
+
+            print(
+                "NAV returned 304 - no new changes."
+            )
+
+            break
 
         items = data.get(
             "items",
@@ -690,12 +1482,16 @@ def main():
         )
 
         print(
-            f"Jobs on page: {len(items)}"
+            f"Items on page: {len(items)}"
         )
+
+        if not items:
+
+            break
 
         for job in items:
 
-            total_checked += 1
+            feed_items += 1
 
             job_id = job.get(
                 "id"
@@ -704,139 +1500,324 @@ def main():
             if not job_id:
                 continue
 
-            if job_id in seen:
+            if job_id in seen_feed_ids:
                 continue
 
-            seen.add(job_id)
+            seen_feed_ids.add(
+                job_id
+            )
 
             feed = job.get(
                 "_feed_entry",
                 {}
             )
 
-            if feed.get("status") != "ACTIVE":
+            status = str(
+                feed.get(
+                    "status",
+                    ""
+                )
+            ).upper()
+
+            # ------------------------------------------------
+            # INACTIVE
+            # ------------------------------------------------
+
+            if status != "ACTIVE":
+
+                inactive_items += 1
+
+                # Если раньше сохраняли вакансию —
+                # удаляем её.
+                jobs_db.pop(
+                    job_id,
+                    None
+                )
+
                 continue
 
-            total_active += 1
+            active_items += 1
 
-            if matches(job):
+            # ------------------------------------------------
+            # BASIC FILTER
+            # ------------------------------------------------
 
-                print(
-                    "MATCH:",
-                    job.get("title")
+            if not basic_candidate(
+                job
+            ):
+                continue
+
+            candidates += 1
+
+            # ------------------------------------------------
+            # FULL DETAILS
+            # ------------------------------------------------
+
+            details_checked += 1
+
+            time.sleep(
+                REQUEST_DELAY
+            )
+
+            content = get_full_job(
+                job,
+                token
+            )
+
+            # Важная проверка:
+            # статус мог измениться между feed
+            # и detail request.
+            if content is None:
+
+                jobs_db.pop(
+                    job_id,
+                    None
                 )
 
-                full = build_job(
-                    job,
-                    token
+                continue
+
+            is_match, score, matched = (
+                full_job_matches(
+                    content
+                )
+            )
+
+            if not is_match:
+
+                # Вакансия раньше могла подходить,
+                # но после изменения больше не подходит.
+                jobs_db.pop(
+                    job_id,
+                    None
                 )
 
-                found.append(full)
+                continue
+
+            matches += 1
+
+            result = build_result(
+                job,
+                content,
+                score,
+                matched
+            )
+
+            jobs_db[job_id] = result
+
+            print(
+                "MATCH:",
+                result.get(
+                    "title"
+                ),
+                "|",
+                result.get(
+                    "company"
+                ),
+                "| score:",
+                score
+            )
+
+        # ----------------------------------------------------
+        # NEXT PAGE
+        # ----------------------------------------------------
 
         next_url = data.get(
             "next_url"
         )
 
         if next_url:
-            next_url = absolute_url(
+
+            next_url = urllib.parse.urljoin(
+                NAV_FEED_URL,
                 next_url
             )
 
-    # ========================================================
-    # УДАЛЯЕМ ДУБЛИКАТЫ
-    # ========================================================
+    # --------------------------------------------------------
+    # SORT
+    # --------------------------------------------------------
 
-    unique = {}
-
-    for job in found:
-
-        if job.get("id"):
-            unique[job["id"]] = job
-
-    found = list(
-        unique.values()
+    sorted_jobs = sorted(
+        jobs_db.values(),
+        key=lambda job: (
+            job.get(
+                "score",
+                0
+            ),
+            job.get(
+                "date_modified",
+                ""
+            )
+        ),
+        reverse=True
     )
 
-    # ========================================================
-    # СОХРАНЯЕМ
-    # ========================================================
+    # --------------------------------------------------------
+    # SAVE JOBS
+    # --------------------------------------------------------
 
-    result = {
+    output = {
 
         "generated_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+            utc_now().isoformat(),
 
-        "pages_checked":
-            MAX_PAGES,
-
-        "jobs_checked":
-            total_checked,
-
-        "active_jobs_checked":
-            total_active,
-
-        "matching_jobs":
-            len(found),
+        "total_matching_jobs":
+            len(sorted_jobs),
 
         "jobs":
-            found,
+            sorted_jobs
     }
 
-    with open(
-        "jobs.json",
-        "w",
-        encoding="utf-8"
-    ) as file:
+    save_json_file(
+        JOBS_FILE,
+        output
+    )
 
-        json.dump(
-            result,
-            file,
-            ensure_ascii=False,
-            indent=2
-        )
+    # --------------------------------------------------------
+    # SAVE STATE
+    # --------------------------------------------------------
 
-    # ========================================================
-    # РЕЗУЛЬТАТ
-    # ========================================================
+    new_state = {
+
+        "last_successful_sync":
+            run_started.isoformat(),
+
+        "last_completed_at":
+            utc_now().isoformat(),
+
+        "feed_pages":
+            pages,
+
+        "feed_items":
+            feed_items,
+
+        "active_items":
+            active_items,
+
+        "inactive_items":
+            inactive_items,
+
+        "candidates":
+            candidates,
+
+        "details_checked":
+            details_checked,
+
+        "matches_found_this_run":
+            matches,
+
+        "total_saved_matching_jobs":
+            len(sorted_jobs)
+    }
+
+    save_json_file(
+        STATE_FILE,
+        new_state
+    )
+
+    # --------------------------------------------------------
+    # OUTPUT
+    # --------------------------------------------------------
 
     print("")
-    print("=" * 60)
+    print("=" * 70)
+    print("SYNC FINISHED")
+    print("=" * 70)
+
     print(
-        f"CHECKED {total_checked} JOBS"
+        "Feed pages:",
+        pages
     )
+
     print(
-        f"ACTIVE {total_active} JOBS"
+        "Feed items:",
+        feed_items
     )
+
     print(
-        f"FOUND {len(found)} MATCHING JOBS"
+        "Active items:",
+        active_items
     )
-    print("=" * 60)
+
+    print(
+        "Inactive items:",
+        inactive_items
+    )
+
+    print(
+        "Candidates:",
+        candidates
+    )
+
+    print(
+        "Details checked:",
+        details_checked
+    )
+
+    print(
+        "Matches this run:",
+        matches
+    )
+
+    print(
+        "Total saved matching jobs:",
+        len(sorted_jobs)
+    )
+
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # SHOW TOP JOBS
+    # --------------------------------------------------------
 
     for number, job in enumerate(
-        found,
-        1
+        sorted_jobs[:30],
+        start=1
     ):
 
         print("")
         print(
-            f"#{number} {job.get('title')}"
+            f"#{number}",
+            job.get(
+                "title"
+            )
         )
 
         print(
             "Company:",
-            job.get("company")
+            job.get(
+                "company"
+            )
+        )
+
+        print(
+            "Score:",
+            job.get(
+                "score"
+            )
+        )
+
+        print(
+            "Keywords:",
+            ", ".join(
+                job.get(
+                    "matched_keywords",
+                    []
+                )
+            )
+        )
+
+        print(
+            "Apply:",
+            job.get(
+                "application_url"
+            )
         )
 
         print(
             "Job:",
-            job.get("job_url")
-        )
-
-        print(
-            "APPLY:",
-            job.get("application_url")
+            job.get(
+                "job_url"
+            )
         )
 
         for contact in job.get(
@@ -844,24 +1825,30 @@ def main():
             []
         ):
 
-            if contact.get("email"):
+            email = contact.get(
+                "email"
+            )
 
+            phone = contact.get(
+                "phone"
+            )
+
+            if email:
                 print(
-                    "EMAIL:",
-                    contact.get("email")
+                    "Email:",
+                    email
                 )
 
-            if contact.get("phone"):
-
+            if phone:
                 print(
-                    "PHONE:",
-                    contact.get("phone")
+                    "Phone:",
+                    phone
                 )
 
     print("")
-    print("=" * 60)
-    print("JOB BOT FINISHED")
-    print("=" * 60)
+    print("=" * 70)
+    print("JOB BOT FINISHED SUCCESSFULLY")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
