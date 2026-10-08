@@ -1,8 +1,5 @@
 import json
 import urllib.request
-import urllib.parse
-import re
-from datetime import datetime, timezone
 
 KEYWORDS = [
     "farm", "farmer", "agriculture", "agricultural",
@@ -17,25 +14,44 @@ EXCLUDE = [
     "lawyer", "manager", "accountant"
 ]
 
-def get_json(url, headers=None):
+
+def get_token():
     request = urllib.request.Request(
-        url,
-        headers=headers or {"User-Agent": "job-bot/1.0"}
+        "https://pam-stilling-feed.nav.no/api/publicToken",
+        headers={"User-Agent": "job-bot/1.0"}
     )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        token = response.read().decode("utf-8").strip()
+
+    # Token may be returned as plain text or as a JSON string
+    if token.startswith('"') and token.endswith('"'):
+        token = json.loads(token)
+
+    return token
+
+
+def get_feed(token):
+    request = urllib.request.Request(
+        "https://pam-stilling-feed.nav.no/api/v1/feed",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "job-bot/1.0"
+        }
+    )
+
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
-def get_nav_token():
-    data = get_json("https://pam-stilling-feed.nav.no/api/publicToken")
-    if isinstance(data, str):
-        return data
-    return data.get("token") or data.get("access_token")
 
 def matches(job):
+    feed_entry = job.get("_feed_entry", {})
+
     text = " ".join([
         str(job.get("title", "")),
         str(job.get("content_text", "")),
-        str(job.get("_feed_entry", {}).get("businessName", ""))
+        str(feed_entry.get("businessName", ""))
     ]).lower()
 
     if any(word in text for word in EXCLUDE):
@@ -43,36 +59,39 @@ def matches(job):
 
     return any(word in text for word in KEYWORDS)
 
+
 def main():
-    token = get_nav_token()
+    print("Getting NAV token...")
+    token = get_token()
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "User-Agent": "job-bot/1.0"
-    }
+    if not token:
+        raise RuntimeError("NAV public token is empty")
 
-    data = get_json(
-        "https://pam-stilling-feed.nav.no/api/v1/feed",
-        headers
-    )
+    print("Getting job feed...")
+    data = get_feed(token)
 
     found = []
 
     for job in data.get("items", []):
-        if job.get("_feed_entry", {}).get("status") != "ACTIVE":
+        feed_entry = job.get("_feed_entry", {})
+
+        if feed_entry.get("status") != "ACTIVE":
             continue
 
         if matches(job):
             found.append({
                 "id": job.get("id"),
                 "title": job.get("title"),
-                "company": job.get("_feed_entry", {}).get("businessName"),
+                "company": feed_entry.get("businessName"),
                 "url": job.get("url"),
                 "date": job.get("date_modified")
             })
 
-    print(json.dumps(found, ensure_ascii=False, indent=2))
+    print(f"Found {len(found)} matching jobs")
+
+    for job in found:
+        print(json.dumps(job, ensure_ascii=False))
+
 
 if __name__ == "__main__":
     main()
