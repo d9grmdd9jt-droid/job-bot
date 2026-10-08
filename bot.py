@@ -2,6 +2,7 @@ import json
 import re
 import urllib.request
 import urllib.parse
+import unicodedata
 from datetime import datetime, timezone
 
 
@@ -9,7 +10,19 @@ from datetime import datetime, timezone
 # НАСТРОЙКИ
 # ============================================================
 
+FEED_URL = "https://pam-stilling-feed.nav.no/api/v1/feed"
+TOKEN_URL = "https://pam-stilling-feed.nav.no/api/publicToken"
+
+MAX_PAGES = 10
+
+
+# ============================================================
+# КЛЮЧЕВЫЕ СЛОВА
+# НОРВЕЖСКИЙ + АНГЛИЙСКИЙ
+# ============================================================
+
 KEYWORDS = [
+
     # FARM / AGRICULTURE
     "farm",
     "farmer",
@@ -17,18 +30,60 @@ KEYWORDS = [
     "farmhand",
     "agriculture",
     "agricultural",
+    "agricultural worker",
+
+    "gård",
+    "gårdsarbeid",
+    "gårdsarbeider",
+    "gårdsarbeidere",
+    "landbruk",
+    "landbruksarbeider",
+    "landbruksarbeid",
+    "jordbruk",
+    "jordbruksarbeider",
+    "jordbruksarbeid",
+
+    # ANIMALS
     "livestock",
     "animal",
     "animals",
+    "animal care",
+    "dyrehold",
+    "dyrestell",
+    "dyrepasser",
+    "dyrepleier",
+    "fjøs",
+    "avløser",
+    "røkter",
+    "husdyr",
+
+    # GREENHOUSE / GARDEN
     "greenhouse",
     "gardener",
     "gardening",
+    "gartner",
+    "gartnerarbeid",
+    "veksthus",
+    "plante",
+    "planter",
+    "hagearbeid",
+
+    # FRUIT / BERRIES / HARVEST
     "fruit",
     "berry",
+    "berries",
     "harvest",
     "seasonal",
+    "seasonal worker",
+    "frukt",
+    "bær",
+    "innhøsting",
+    "sesong",
+    "sesongarbeid",
+    "sesongarbeider",
+    "sesongarbeidere",
 
-    # FORESTRY / WOOD
+    # FORESTRY
     "forestry",
     "forest",
     "forest worker",
@@ -40,61 +95,149 @@ KEYWORDS = [
     "sawmill",
     "timber",
 
-    # WAREHOUSE / PRODUCTION
+    "skog",
+    "skogbruk",
+    "skogarbeid",
+    "skogarbeider",
+    "skogsarbeider",
+    "skogbruksarbeider",
+    "hogst",
+    "tømmer",
+    "tømmerhogst",
+    "ved",
+    "vedproduksjon",
+    "sagbruk",
+    "trevirke",
+
+    # WAREHOUSE
     "warehouse",
     "warehouse worker",
     "warehouse operative",
+    "warehouse assistant",
+    "lager",
+    "lagerarbeider",
+    "lagermedarbeider",
+    "lagerarbeid",
+    "lagerjobb",
+    "varelager",
+    "logistikk",
+    "plukker",
+    "ordreplukker",
+    "pakker",
+    "pakking",
+    "vareplukk",
+
+    # PRODUCTION / FACTORY
     "production worker",
+    "production operative",
     "factory worker",
     "production",
+    "factory",
     "packing",
     "packer",
-    "packing worker",
     "picker",
-    "order picker",
+    "manufacturing",
+
+    "produksjon",
+    "produksjonsarbeid",
+    "produksjonsarbeider",
+    "produksjonsmedarbeider",
+    "fabrikk",
+    "fabrikkarbeider",
+    "industriproduksjon",
+    "pakking",
+    "pakker",
+    "pakking",
+    "sortering",
+    "sorteringsarbeid",
 
     # GENERAL PHYSICAL WORK
     "labourer",
     "laborer",
     "general worker",
-    "worker",
-    "seasonal worker",
     "manual worker",
+    "physical work",
+
+    "arbeider",
+    "arbeidsmann",
+    "hjelpearbeider",
+    "håndverker",
+    "manuelt arbeid",
+    "fysisk arbeid",
+    "praktisk arbeid",
+
+    # CONSTRUCTION / OUTDOOR
+    "construction worker",
+    "construction",
+    "anleggsarbeider",
+    "anleggsarbeid",
+    "byggarbeider",
+    "byggearbeid",
+    "utearbeid",
+    "utendørsarbeid",
+
+    # MACHINE / TRACTOR
+    "tractor",
+    "tractor driver",
+    "machine operator",
+    "maskinfører",
+    "maskinoperatør",
+    "traktorfører",
+    "traktor",
 ]
 
 
+# ============================================================
+# СЛОВА, КОТОРЫЕ ЧАСТО ОЗНАЧАЮТ НЕПОДХОДЯЩУЮ ПРОФЕССИЮ
+# ============================================================
+
 EXCLUDE = [
+
+    # IT
     "software engineer",
     "software developer",
     "developer",
     "programmer",
+    "programmering",
     "frontend",
     "backend",
     "full stack",
     "devops",
     "data scientist",
+    "data engineer",
+    "systemutvikler",
+    "systemutvikling",
+    "it-konsulent",
+    "it konsulent",
+
+    # MEDICAL
     "doctor",
     "dentist",
+    "doctorate",
+    "lege",
+    "tannlege",
+    "sykepleier",
+    "sykepleie",
+    "kirurg",
+
+    # LAW
     "lawyer",
+    "jurist",
+    "advokat",
+
+    # FINANCE
     "accountant",
+    "accounting",
+    "regnskapsfører",
+    "regnskap",
+
+    # HIGH-SKILL OFFICE
     "architect",
-    "surgeon",
+    "arkitekt",
+    "financial analyst",
+    "analytiker",
+    "controller",
 ]
-
-
-BASE_URL = "https://pam-stilling-feed.nav.no"
-
-FEED_URL = (
-    "https://pam-stilling-feed.nav.no/api/v1/feed"
-)
-
-PUBLIC_TOKEN_URL = (
-    "https://pam-stilling-feed.nav.no/api/publicToken"
-)
-
-# Сколько страниц feed проверять за один запуск.
-# 5 = быстро и безопасно для GitHub Actions.
-MAX_PAGES = 5
 
 
 # ============================================================
@@ -102,10 +245,6 @@ MAX_PAGES = 5
 # ============================================================
 
 def http_get(url, headers=None):
-    """
-    GET-запрос.
-    Возвращает HTTP status, headers и body.
-    """
 
     request = urllib.request.Request(
         url,
@@ -114,65 +253,86 @@ def http_get(url, headers=None):
         }
     )
 
-    with urllib.request.urlopen(request, timeout=30) as response:
-        status = response.status
-        response_headers = dict(response.headers)
-        body = response.read()
+    with urllib.request.urlopen(
+        request,
+        timeout=30
+    ) as response:
 
-    return status, response_headers, body
+        return (
+            response.status,
+            dict(response.headers),
+            response.read()
+        )
 
 
 # ============================================================
-# NAV TOKEN
+# НОРМАЛИЗАЦИЯ ТЕКСТА
 # ============================================================
 
-def get_nav_token():
-    """
-    NAV возвращает примерно:
+def normalize(text):
 
-    *** public token for Nav Job Vacancy Feed:
-    eyJxxxxx.yyyyy.zzzzz
+    if not text:
+        return ""
 
-    Нам нужен только JWT.
-    """
+    text = str(text).lower()
+
+    # Убираем HTML
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        text
+    )
+
+    # Нормализация Unicode
+    text = unicodedata.normalize(
+        "NFKC",
+        text
+    )
+
+    # Пробелы
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# TOKEN
+# ============================================================
+
+def get_token():
 
     print("Getting NAV public token...")
 
     status, headers, body = http_get(
-        PUBLIC_TOKEN_URL,
+        TOKEN_URL,
         {
             "User-Agent": "job-bot/1.0",
             "Accept": "*/*"
         }
     )
 
-    text = body.decode("utf-8", errors="replace").strip()
+    text = body.decode(
+        "utf-8",
+        errors="replace"
+    ).strip()
 
     if status != 200:
         raise RuntimeError(
-            f"NAV token request failed: HTTP {status}"
+            f"NAV token error: HTTP {status}"
         )
 
-    if not text:
-        raise RuntimeError(
-            "NAV returned an empty token response"
-        )
-
-    # Ищем настоящий JWT.
-    #
-    # JWT обычно выглядит так:
-    # eyJ....eyJ....xxxxx
-    #
-    # Поэтому НЕ используем весь ответ NAV.
+    # NAV отдаёт текст перед JWT.
+    # Ищем только настоящий JWT.
     match = re.search(
         r"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)",
         text
     )
 
     if not match:
-        print("NAV token response:")
-        print(text[:500])
-
         raise RuntimeError(
             "Could not find JWT token in NAV response"
         )
@@ -185,53 +345,46 @@ def get_nav_token():
 
 
 # ============================================================
-# GET FEED PAGE
+# FEED
 # ============================================================
 
-def get_feed_page(url, token):
-    """
-    Получает одну страницу NAV feed.
-    """
+def get_feed(url, token):
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "User-Agent": "job-bot/1.0"
-    }
-
-    status, response_headers, body = http_get(
+    status, headers, body = http_get(
         url,
-        headers
+        {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "job-bot/1.0"
+        }
     )
 
     if status != 200:
         raise RuntimeError(
-            f"NAV feed request failed: HTTP {status}"
+            f"NAV feed error: HTTP {status}"
         )
 
     try:
-        data = json.loads(
+        return json.loads(
             body.decode("utf-8")
         )
-    except json.JSONDecodeError as error:
-        print("NAV returned invalid JSON:")
-        print(body[:1000])
 
-        raise RuntimeError(
-            f"Could not decode NAV feed JSON: {error}"
+    except json.JSONDecodeError as error:
+
+        print(
+            body[:1000]
         )
 
-    return data
+        raise RuntimeError(
+            f"Invalid NAV JSON: {error}"
+        )
 
 
 # ============================================================
-# NORMALIZE URL
+# URL
 # ============================================================
 
 def absolute_url(url):
-    """
-    Делает URL абсолютным, если NAV вернул относительный.
-    """
 
     if not url:
         return None
@@ -243,70 +396,61 @@ def absolute_url(url):
         return url
 
     return urllib.parse.urljoin(
-        BASE_URL,
+        "https://pam-stilling-feed.nav.no/",
         url
     )
 
 
 # ============================================================
-# MATCHING
+# СОБИРАЕМ ТЕКСТ ВАКАНСИИ
 # ============================================================
 
-def job_text(job):
-    """
-    Собирает весь доступный текст вакансии
-    для поиска ключевых слов.
-    """
+def get_search_text(job):
 
-    feed_entry = job.get(
+    feed = job.get(
         "_feed_entry",
         {}
     )
 
-    parts = [
-        job.get("title", ""),
-        job.get("content_text", ""),
-        feed_entry.get("title", ""),
-        feed_entry.get("businessName", ""),
-        feed_entry.get("municipal", ""),
-    ]
+    text = " ".join([
+        str(job.get("title", "")),
+        str(job.get("content_text", "")),
+        str(feed.get("title", "")),
+        str(feed.get("businessName", "")),
+        str(feed.get("municipal", "")),
+    ])
 
-    return " ".join(
-        str(x)
-        for x in parts
-        if x
-    ).lower()
+    return normalize(text)
 
 
-def matches_job(job):
-    """
-    Проверяет, подходит ли вакансия.
-    """
+# ============================================================
+# ПОИСК ПОДХОДЯЩЕЙ ВАКАНСИИ
+# ============================================================
 
-    text = job_text(job)
+def matches(job):
 
-    # Сначала исключения.
+    text = get_search_text(job)
+
+    # Сначала исключения
     for word in EXCLUDE:
-        if word in text:
+
+        if normalize(word) in text:
             return False
 
-    # Потом ключевые слова.
+    # Потом подходящие слова
     for word in KEYWORDS:
-        if word in text:
+
+        if normalize(word) in text:
             return True
 
     return False
 
 
 # ============================================================
-# GET FULL JOB DETAILS
+# ПОЛНАЯ ИНФОРМАЦИЯ О ВАКАНСИИ
 # ============================================================
 
-def get_job_details(job, token):
-    """
-    NAV feed item содержит URL,
-    по которому можно получить полную вакансию.
-    """
+def get_details(job, token):
 
     url = absolute_url(
         job.get("url")
@@ -316,21 +460,17 @@ def get_job_details(job, token):
         return {}
 
     try:
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-            "User-Agent": "job-bot/1.0"
-        }
 
-        status, response_headers, body = http_get(
+        status, headers, body = http_get(
             url,
-            headers
+            {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "User-Agent": "job-bot/1.0"
+            }
         )
 
         if status != 200:
-            print(
-                f"Could not get job details: HTTP {status}"
-            )
             return {}
 
         return json.loads(
@@ -338,117 +478,26 @@ def get_job_details(job, token):
         )
 
     except Exception as error:
+
         print(
-            f"Could not get job details: {error}"
+            f"Details error: {error}"
         )
 
         return {}
 
 
 # ============================================================
-# EXTRACT CONTACTS
+# ИЗВЛЕЧЕНИЕ ДАННЫХ
 # ============================================================
 
-def extract_contacts(details):
-    """
-    Достаёт email и телефон работодателя.
-    """
+def build_job(job, token):
 
-    contacts = []
-
-    content = details.get(
-        "ad_content",
-        details
-    )
-
-    contact_list = content.get(
-        "contactList",
-        []
-    )
-
-    if not isinstance(
-        contact_list,
-        list
-    ):
-        return contacts
-
-    for contact in contact_list:
-
-        if not isinstance(
-            contact,
-            dict
-        ):
-            continue
-
-        contacts.append({
-            "name": contact.get(
-                "name"
-            ),
-            "email": contact.get(
-                "email"
-            ),
-            "phone": contact.get(
-                "phone"
-            ),
-            "role": contact.get(
-                "role"
-            ),
-            "title": contact.get(
-                "title"
-            ),
-        })
-
-    return contacts
-
-
-# ============================================================
-# EXTRACT APPLICATION URL
-# ============================================================
-
-def extract_application_url(details):
-    """
-    NAV обычно хранит ссылку для подачи заявки
-    в applicationUrl.
-    """
-
-    content = details.get(
-        "ad_content",
-        details
-    )
-
-    application_url = content.get(
-        "applicationUrl"
-    )
-
-    if application_url:
-        return application_url
-
-    # Иногда полезная ссылка может находиться здесь.
-    link = content.get(
-        "link"
-    )
-
-    if link:
-        return link
-
-    return None
-
-
-# ============================================================
-# PROCESS JOB
-# ============================================================
-
-def process_job(job, token):
-    """
-    Превращает NAV vacancy в нормальный объект.
-    """
-
-    feed_entry = job.get(
+    feed = job.get(
         "_feed_entry",
         {}
     )
 
-    details = get_job_details(
+    details = get_details(
         job,
         token
     )
@@ -457,6 +506,12 @@ def process_job(job, token):
         "ad_content",
         details
     )
+
+    if not isinstance(
+        content,
+        dict
+    ):
+        content = {}
 
     employer = content.get(
         "employer",
@@ -469,42 +524,69 @@ def process_job(job, token):
     ):
         employer = {}
 
-    work_locations = content.get(
+    contacts = content.get(
+        "contactList",
+        []
+    )
+
+    if not isinstance(
+        contacts,
+        list
+    ):
+        contacts = []
+
+    clean_contacts = []
+
+    for contact in contacts:
+
+        if not isinstance(
+            contact,
+            dict
+        ):
+            continue
+
+        clean_contacts.append({
+            "name": contact.get("name"),
+            "email": contact.get("email"),
+            "phone": contact.get("phone"),
+            "role": contact.get("role"),
+        })
+
+    locations = content.get(
         "workLocations",
         []
     )
 
     if not isinstance(
-        work_locations,
+        locations,
         list
     ):
-        work_locations = []
+        locations = []
 
     location = None
 
-    if work_locations:
-        first_location = work_locations[0]
+    if locations:
+
+        first = locations[0]
 
         if isinstance(
-            first_location,
+            first,
             dict
         ):
             location = {
-                "country": first_location.get(
-                    "country"
-                ),
-                "city": first_location.get(
-                    "city"
-                ),
-                "municipal": first_location.get(
-                    "municipal"
-                ),
-                "address": first_location.get(
-                    "address"
-                ),
+                "country": first.get("country"),
+                "city": first.get("city"),
+                "municipal": first.get("municipal"),
+                "address": first.get("address"),
             }
 
-    result = {
+    application_url = (
+        content.get("applicationUrl")
+        or content.get("applicationUrl")
+    )
+
+    return {
+
         "id": job.get("id"),
 
         "title": (
@@ -514,13 +596,7 @@ def process_job(job, token):
 
         "company": (
             employer.get("name")
-            or feed_entry.get(
-                "businessName"
-            )
-        ),
-
-        "organization_number": (
-            employer.get("orgnr")
+            or feed.get("businessName")
         ),
 
         "location": location,
@@ -529,11 +605,7 @@ def process_job(job, token):
             job.get("url")
         ),
 
-        "application_url": (
-            extract_application_url(
-                details
-            )
-        ),
+        "application_url": application_url,
 
         "source_url": content.get(
             "sourceurl"
@@ -555,11 +627,7 @@ def process_job(job, token):
             "starttime"
         ),
 
-        "position_count": content.get(
-            "positioncount"
-        ),
-
-        "application_deadline": content.get(
+        "deadline": content.get(
             "applicationDue"
         ),
 
@@ -567,16 +635,12 @@ def process_job(job, token):
             "homepage"
         ),
 
-        "contacts": extract_contacts(
-            details
-        ),
+        "contacts": clean_contacts,
 
         "date_modified": job.get(
             "date_modified"
         ),
     }
-
-    return result
 
 
 # ============================================================
@@ -589,29 +653,21 @@ def main():
     print("JOB BOT STARTED")
     print("=" * 60)
 
-    # --------------------------------------------------------
-    # 1. TOKEN
-    # --------------------------------------------------------
-
-    token = get_nav_token()
-
-    # --------------------------------------------------------
-    # 2. FEED
-    # --------------------------------------------------------
+    token = get_token()
 
     print("Getting NAV job feed...")
 
     next_url = FEED_URL
 
-    found_jobs = []
+    found = []
 
-    seen_ids = set()
+    seen = set()
 
-    # --------------------------------------------------------
-    # 3. PAGES
-    # --------------------------------------------------------
+    total_active = 0
 
-    for page_number in range(
+    total_checked = 0
+
+    for page in range(
         1,
         MAX_PAGES + 1
     ):
@@ -620,10 +676,10 @@ def main():
             break
 
         print(
-            f"Checking feed page {page_number}..."
+            f"Checking feed page {page}..."
         )
 
-        data = get_feed_page(
+        data = get_feed(
             next_url,
             token
         )
@@ -639,6 +695,8 @@ def main():
 
         for job in items:
 
+            total_checked += 1
+
             job_id = job.get(
                 "id"
             )
@@ -646,56 +704,34 @@ def main():
             if not job_id:
                 continue
 
-            if job_id in seen_ids:
+            if job_id in seen:
                 continue
 
-            seen_ids.add(
-                job_id
-            )
+            seen.add(job_id)
 
-            feed_entry = job.get(
+            feed = job.get(
                 "_feed_entry",
                 {}
             )
 
-            status = feed_entry.get(
-                "status"
-            )
-
-            # Только активные вакансии.
-            if status != "ACTIVE":
+            if feed.get("status") != "ACTIVE":
                 continue
 
-            # Проверяем ключевые слова.
-            if not matches_job(job):
-                continue
+            total_active += 1
 
-            print(
-                "MATCH:",
-                job.get("title")
-            )
+            if matches(job):
 
-            try:
+                print(
+                    "MATCH:",
+                    job.get("title")
+                )
 
-                full_job = process_job(
+                full = build_job(
                     job,
                     token
                 )
 
-                found_jobs.append(
-                    full_job
-                )
-
-            except Exception as error:
-
-                print(
-                    "Error processing job:",
-                    error
-                )
-
-        # ----------------------------------------------------
-        # NEXT PAGE
-        # ----------------------------------------------------
+                found.append(full)
 
         next_url = data.get(
             "next_url"
@@ -706,39 +742,46 @@ def main():
                 next_url
             )
 
-    # --------------------------------------------------------
-    # 4. REMOVE DUPLICATES
-    # --------------------------------------------------------
+    # ========================================================
+    # УДАЛЯЕМ ДУБЛИКАТЫ
+    # ========================================================
 
-    unique_jobs = {}
+    unique = {}
 
-    for job in found_jobs:
+    for job in found:
 
-        job_id = job.get(
-            "id"
-        )
+        if job.get("id"):
+            unique[job["id"]] = job
 
-        if job_id:
-            unique_jobs[job_id] = job
-
-    found_jobs = list(
-        unique_jobs.values()
+    found = list(
+        unique.values()
     )
 
-    # --------------------------------------------------------
-    # 5. SAVE RESULTS
-    # --------------------------------------------------------
+    # ========================================================
+    # СОХРАНЯЕМ
+    # ========================================================
 
-    output = {
-        "generated_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
+    result = {
 
-        "count": len(
-            found_jobs
-        ),
+        "generated_at":
+            datetime.now(
+                timezone.utc
+            ).isoformat(),
 
-        "jobs": found_jobs
+        "pages_checked":
+            MAX_PAGES,
+
+        "jobs_checked":
+            total_checked,
+
+        "active_jobs_checked":
+            total_active,
+
+        "matching_jobs":
+            len(found),
+
+        "jobs":
+            found,
     }
 
     with open(
@@ -748,26 +791,32 @@ def main():
     ) as file:
 
         json.dump(
-            output,
+            result,
             file,
             ensure_ascii=False,
             indent=2
         )
 
-    # --------------------------------------------------------
-    # 6. PRINT RESULTS
-    # --------------------------------------------------------
+    # ========================================================
+    # РЕЗУЛЬТАТ
+    # ========================================================
 
     print("")
     print("=" * 60)
     print(
-        f"FOUND {len(found_jobs)} MATCHING JOBS"
+        f"CHECKED {total_checked} JOBS"
+    )
+    print(
+        f"ACTIVE {total_active} JOBS"
+    )
+    print(
+        f"FOUND {len(found)} MATCHING JOBS"
     )
     print("=" * 60)
 
     for number, job in enumerate(
-        found_jobs,
-        start=1
+        found,
+        1
     ):
 
         print("")
@@ -780,17 +829,6 @@ def main():
             job.get("company")
         )
 
-        location = job.get(
-            "location"
-        )
-
-        if location:
-            print(
-                "Location:",
-                location.get("city")
-                or location.get("municipal")
-            )
-
         print(
             "Job:",
             job.get("job_url")
@@ -798,25 +836,23 @@ def main():
 
         print(
             "APPLY:",
-            job.get(
-                "application_url"
-            )
+            job.get("application_url")
         )
 
-        contacts = job.get(
+        for contact in job.get(
             "contacts",
             []
-        )
-
-        for contact in contacts:
+        ):
 
             if contact.get("email"):
+
                 print(
                     "EMAIL:",
                     contact.get("email")
                 )
 
             if contact.get("phone"):
+
                 print(
                     "PHONE:",
                     contact.get("phone")
@@ -827,10 +863,6 @@ def main():
     print("JOB BOT FINISHED")
     print("=" * 60)
 
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
     main()
