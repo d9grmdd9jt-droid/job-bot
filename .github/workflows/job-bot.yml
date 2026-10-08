@@ -2,16 +2,42 @@ name: Job Bot
 
 on:
   workflow_dispatch:
+
   schedule:
     - cron: "*/15 * * * *"
 
+permissions:
+  contents: write
+
+concurrency:
+  group: job-bot
+  cancel-in-progress: false
+
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
+
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Download bot
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Run job bot
-        run: python bot.py
+        run: |
+          python3 bot.py
+
+      - name: Save bot state
+        if: success()
+        run: |
+          git config user.name "job-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add jobs.json nav_state.json
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update job bot state"
+            git push
+          fi
