@@ -1,0 +1,17 @@
+name: Job Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download bot
+        uses: actions/checkout@v4
+
+      - name: Run job bot
+        run: python bot.py
